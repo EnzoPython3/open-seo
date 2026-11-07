@@ -145,6 +145,17 @@ describe("handleReportRequest", () => {
     expect(mocks.getReportHtml).not.toHaveBeenCalled();
   });
 
+  it("refuses a forbidden identity without loading the report", async () => {
+    mocks.resolveUserContextFromHeaders.mockRejectedValue(
+      new Error("FORBIDDEN"),
+    );
+
+    const response = await handleReportRequest("report-1", request());
+
+    expect(response.status).toBe(403);
+    expect(mocks.getReportProjectId).not.toHaveBeenCalled();
+  });
+
   it("bounces an unauthenticated viewer to sign-in", async () => {
     mocks.resolveUserContextFromHeaders.mockRejectedValue(
       new Error("UNAUTHENTICATED"),

@@ -32,8 +32,13 @@ async function handleReportRequest(
     // Only a missing session is answered here, and only where the app has
     // its own sign-in page. A config or session-store failure must not
     // masquerade as "you are logged out", and the delegated self-hosted modes
-    // have no sign-in page to complete.
-    if (asAppError(error)?.code !== "UNAUTHENTICATED") throw error;
+    // have no sign-in page to complete. A verified Access identity the app
+    // refuses (a service token) is a 403, not a Worker exception.
+    const appError = asAppError(error);
+    if (appError?.code === "FORBIDDEN") {
+      return textResponse("You do not have access to this report.", 403);
+    }
+    if (appError?.code !== "UNAUTHENTICATED") throw error;
     if (!usesBetterAuth(env.AUTH_MODE)) {
       return textResponse("Sign in to read this report.", 401);
     }
