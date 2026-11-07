@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/server";
 import { getHostedBaseUrl } from "@/lib/auth";
 import { MCP_SCOPE } from "@/lib/oauth-resource";
+import { isAbsentAccessJwtError } from "@/middleware/ensure-user/absentAccessJwt";
 import { resolveCloudflareAccessContext } from "@/middleware/ensure-user/cloudflareAccess";
 import { resolveLocalNoAuthContext } from "@/middleware/ensure-user/delegated";
 import {
@@ -23,7 +24,7 @@ import { createOpenSeoMcpServer } from "@/server/mcp/server";
 import { supportsMcpApps } from "@/server/mcp/ui-capabilities";
 import { AuthRepository } from "@/server/auth/repositories/AuthRepository";
 import { GuestAccountRepository } from "@/server/auth/repositories/GuestAccountRepository";
-import { describeError } from "@/server/lib/errors";
+import { asAppError, describeError } from "@/server/lib/errors";
 
 // Mirrors the agents SDK's DEFAULT_CORS_OPTIONS so legacy responses carry the
 // same CORS surface as the modern handler's.
@@ -257,6 +258,28 @@ export async function handleAuthenticatedOpenSeoMcpRequest(
   ])(request, env, ctx);
 }
 
+// Expected Access rejections are responses. Anything else, including a
+// missing TEAM_DOMAIN / POLICY_AUD and an issuer or audience mismatch, stays
+// thrown so it remains a Worker failure. No Bearer challenge: cloudflare_access
+// does not mount the worker OAuth provider, and a challenge would send clients
+// at discovery endpoints this mode does not serve.
+function selfHostedMcpAuthRejection(error: unknown): Response | null {
+  const appError = asAppError(error);
+  if (!appError) return null;
+
+  if (appError.code === "UNAUTHENTICATED" || isAbsentAccessJwtError(appError)) {
+    console.debug(`mcp.access rejected: ${describeError(appError)}`);
+    return new Response("Authentication required", { status: 401 });
+  }
+
+  if (appError.code === "FORBIDDEN") {
+    console.warn(`mcp.access rejected: ${describeError(appError)}`);
+    return new Response(appError.message, { status: 403 });
+  }
+
+  return null;
+}
+
 export async function handleSelfHostedOpenSeoMcpRequest(
   request: Request,
   authMode: "cloudflare_access" | "local_noauth",
@@ -268,10 +291,17 @@ export async function handleSelfHostedOpenSeoMcpRequest(
     return new Response(null, { headers: MCP_CORS_HEADERS });
   }
 
-  const identity =
-    authMode === "local_noauth"
-      ? await resolveLocalNoAuthContext()
-      : await resolveCloudflareAccessContext(request.headers);
+  let identity;
+  try {
+    identity =
+      authMode === "local_noauth"
+        ? await resolveLocalNoAuthContext()
+        : await resolveCloudflareAccessContext(request.headers);
+  } catch (error) {
+    const rejection = selfHostedMcpAuthRejection(error);
+    if (rejection) return rejection;
+    throw error;
+  }
   const props = createWorkersOAuthMcpProps({
     userId: identity.userId,
     userEmail: identity.userEmail,
